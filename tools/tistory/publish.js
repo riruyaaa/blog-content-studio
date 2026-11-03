@@ -21,6 +21,7 @@
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright-core');
+const L = require('./lib');
 
 const argv = process.argv.slice(2);
 const flag = (n) => argv.includes('--' + n);
@@ -32,6 +33,9 @@ const PROFILE = path.join(__dirname, '.profile');     // 카카오 로그인 상
 const STATE_DIR = process.env.BCS_STATE_DIR || __dirname;  // 시험할 때만 다른 폴더로 바꿉니다.
 const SESSION_FILE = path.join(STATE_DIR, '.session.json'); // 서버 로그인 세션 (git 제외)
 const LEDGER_FILE = path.join(STATE_DIR, '.ledger.json');   // 이미 올린 글 기록 (중복 업로드 방지)
+const CONFIG_FILE = path.join(STATE_DIR, 'config.json');    // 발행 방식 등 설정 (기본: 임시저장). git 제외
+const LOG_DIR = path.join(STATE_DIR, 'logs');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const COOKIE_FILE = path.join(__dirname, '.cookies.json');  // 티스토리 로그인 쿠키 (로그인 정보와 같으니 공유 금지, git 제외)
 
 const log = (...a) => console.log(new Date().toLocaleString('ko-KR'), ...a);
@@ -93,6 +97,168 @@ async function writeBack(postId, patch) {
     });
     if (!res.ok) log('서버에 결과를 기록하지 못했어요 (' + res.status + ')');
   } catch (e) { log('서버에 결과를 기록하지 못했어요:', e.message); }
+}
+
+// ---------------- 수신함(inbox_posts) = 자동 발행 대기열 ----------------
+async function sb(method, query, body) {
+  const s = await serverSession();
+  const res = await fetch(C.url + '/rest/v1/' + query, {
+    method,
+    headers: { apikey: C.key, Authorization: 'Bearer ' + s.access, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error('서버 요청 실패 (' + method + ' ' + query.split('?')[0] + ' ' + res.status + ')');
+  return method === 'GET' ? res.json() : true;
+}
+const patchRow = (id, patch) => sb('PATCH', 'inbox_posts?id=eq.' + id, patch);
+
+// 발행/실패 기록: 사람이 읽는 로그는 콘솔(로그 파일로 리다이렉트), 기계가 읽는 로그는 JSONL
+function logEvent(ev) {
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    fs.appendFileSync(path.join(LOG_DIR, 'publish.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...ev }) + '\n');
+  } catch (e) { /* 로그 실패는 무시 */ }
+}
+
+// 블로그 RSS(공개 피드)로 최근 발행 글과 URL을 확인합니다. 공식 제공 기능이라 로그인이 필요 없어요.
+async function fetchRssItems() {
+  try {
+    const res = await fetch(BLOG + '/rss', { headers: { 'User-Agent': 'blog-content-studio/1.0' } });
+    return res.ok ? L.parseRss(await res.text()) : [];
+  } catch (e) { return []; }
+}
+async function findPublishedUrl(title, tries) {
+  for (let i = 0; i < (tries || 6); i++) {
+    const hit = (await fetchRssItems()).find((x) => L.normalize(x.title) === L.normalize(title));
+    if (hit) return hit.url || '';
+    await sleep(5000);
+  }
+  return '';
+}
+
+// 최근 발행 글: RSS + 수신함에서 공개 발행된 글
+async function recentHistory(cfg) {
+  const since = new Date(Date.now() - cfg.dupWindowDays * 86400000).toISOString();
+  const rss = await fetchRssItems();
+  let rows = [];
+  try { rows = await sb('GET', 'inbox_posts?select=title,topic,published_url&status=eq.published&published_at=gte.' + since + '&limit=300'); } catch (e) { log('수신함 이력을 불러오지 못했어요:', e.message); }
+  return [...rss.map((x) => ({ title: x.title, url: x.url })), ...rows.map((r) => ({ title: r.title, topic: r.topic, url: r.published_url }))];
+}
+
+// 'publishing'에서 멈춘 글(실행 도중 중단)을 정리합니다. 공개 발행이었다면 RSS로 실제 발행 여부를 먼저 확인해 중복을 막아요.
+async function reclaimStale(cfg) {
+  const rows = await sb('GET', 'inbox_posts?select=id,title,attempts,last_error&status=eq.publishing');
+  for (const r of rows) {
+    const marker = String(r.last_error || '').replace('publishing@', '');
+    if (Date.parse(marker) && L.minutesSince(marker) < cfg.staleMinutes) continue;
+    const url = await findPublishedUrl(r.title, 1);
+    if (url) { await patchRow(r.id, { status: 'published', published_url: url, published_at: new Date().toISOString(), last_error: null }); log('중단됐던 글이 실제로는 발행되어 있었어요:', r.title); logEvent({ event: 'reclaimed_published', id: r.id, title: r.title, url }); }
+    else { await patchRow(r.id, { status: r.attempts >= cfg.maxAttempts ? 'failed' : 'pending', last_error: '이전 실행이 중단됨' }); log('중단됐던 글을 대기열로 되돌렸어요:', r.title); logEvent({ event: 'reclaimed_pending', id: r.id, title: r.title }); }
+  }
+}
+
+async function publishRow(row, mode, cfg) {
+  const attempt = row.attempts + 1;
+  await patchRow(row.id, { status: 'publishing', attempts: attempt, last_error: 'publishing@' + new Date().toISOString() });
+  log('발행 시도 ' + attempt + '/' + cfg.maxAttempts + ':', row.title, '(출처:', row.source + ', 방식:', mode === 'public' ? '공개 발행' : '임시저장', ')');
+  try {
+    const r = await upload({ title: row.title, tags: row.tags, content: L.prepareContent(row, cfg) }, mode, { interactive: false });
+    if (!r.ok) throw new Error('저장 확인에 실패했어요: ' + (r.via || ''));
+    // 임시저장 방식에서는 저장 요청에 표가 그대로 들어갔는지도 확인합니다. (본문 유실·변형 방지)
+    const wantTables = (String(row.content).match(/<table[\s>]/gi) || []).length;
+    if (mode === 'draft' && r.tables !== undefined && r.tables < wantTables) throw new Error('표가 저장되지 않았어요 (원문 ' + wantTables + '개 → 저장 ' + r.tables + '개)');
+    if (mode === 'draft') log('저장 확인: 본문 ' + r.textLen + '자, 표 ' + r.tables + '개, 태그 "' + r.tags + '"');
+    const url = mode === 'public' ? await findPublishedUrl(row.title) : '';
+    await patchRow(row.id, { status: mode === 'public' ? 'published' : 'drafted', published_url: url || null, published_at: new Date().toISOString(), last_error: null });
+    log('성공:', row.title, mode === 'public' ? '→ ' + (url || '(URL은 RSS에 아직 안 보임)') : '→ 임시저장');
+    logEvent({ event: 'success', id: row.id, title: row.title, source: row.source, mode, url, attempt });
+  } catch (e) {
+    // 공개 발행 도중 오류가 났어도 실제로는 올라갔을 수 있으니, 재시도 전에 RSS로 확인해 중복 발행을 막습니다.
+    const landed = mode === 'public' ? await findPublishedUrl(row.title, 3) : '';
+    if (landed) {
+      await patchRow(row.id, { status: 'published', published_url: landed, published_at: new Date().toISOString(), last_error: null });
+      log('오류가 있었지만 실제로는 발행되어 있었어요(중복 방지):', landed);
+      logEvent({ event: 'success_after_error', id: row.id, title: row.title, url: landed, attempt });
+      return;
+    }
+    const final = attempt >= cfg.maxAttempts;
+    await patchRow(row.id, { status: final ? 'failed' : 'pending', last_error: String(e.message).slice(0, 500) });
+    logEvent({ event: 'failure', id: row.id, title: row.title, attempt, final, error: e.message });
+    throw new Error((final ? '최종 실패(더 이상 재시도하지 않아요): ' : '실패(다음 실행에서 다시 시도해요): ') + e.message);
+  }
+}
+
+async function runGenerator() {
+  const script = path.join(__dirname, '..', 'generate', 'generate.js');
+  if (!fs.existsSync(script)) { log('생성기(tools/generate/generate.js)가 없어요.'); return; }
+  log('수신함이 비어 있어 Claude로 새 글을 생성해요.');
+  const r = require('child_process').spawnSync(process.execPath, [script], { stdio: 'inherit', env: process.env });
+  if (r.status !== 0) log('글 생성에 실패했어요 (종료 코드 ' + r.status + ')');
+}
+
+async function runInbox() {
+  const cfg = L.loadConfig(CONFIG_FILE);
+  const mode = flag('public') ? 'public' : flag('draft') ? 'draft' : cfg.publishMode;
+  log('실행 모드:', mode === 'public' ? '공개 발행' + (cfg.approvedAt ? ' (승인: ' + cfg.approvedAt + ')' : '') : '임시저장 (공개 발행은 --approve-public 후에만)');
+  await reclaimStale(cfg);
+
+  const pending = () => sb('GET', 'inbox_posts?select=*&status=eq.pending&attempts=lt.' + cfg.maxAttempts + '&order=created_at.asc&limit=20');
+  let rows = await pending();
+  if (!rows.length && (flag('generate') || cfg.fallbackGenerate)) { await runGenerator(); rows = await pending(); }
+  if (!rows.length) { log('수신함에 발행할 글이 없어요.'); logEvent({ event: 'empty' }); return false; }
+
+  const recent = await recentHistory(cfg);
+  for (const row of rows.slice(0, 5)) {
+    const dup = L.findDuplicate({ title: row.title, topic: row.topic }, recent, cfg.dupThreshold);
+    if (dup) {
+      if (dup.exactTitle && row.attempts > 0 && dup.item.url) {
+        await patchRow(row.id, { status: 'published', published_url: dup.item.url, published_at: new Date().toISOString(), last_error: null });
+        log('이전 시도에서 이미 발행된 글이에요(중복 발행 안 함):', dup.item.url);
+        logEvent({ event: 'already_published', id: row.id, title: row.title, url: dup.item.url });
+        return true;
+      }
+      await patchRow(row.id, { status: 'skipped_duplicate', last_error: '중복 주제: "' + dup.item.title + '" (유사도 ' + dup.score.toFixed(2) + ')' });
+      log('중복 주제라 건너뛰어요:', row.title, '≈', dup.item.title, '(' + dup.score.toFixed(2) + ')');
+      logEvent({ event: 'skipped_duplicate', id: row.id, title: row.title, similarTo: dup.item.title, score: dup.score });
+      continue;
+    }
+    await publishRow(row, mode, cfg);
+    return true; // 한 번 실행에 한 개
+  }
+  log('중복이 아닌 글이 없어서 이번에는 발행하지 않았어요.');
+  return false;
+}
+
+// 시험 글 정리: 제목이 [자동화 테스트] / [점검] 으로 시작하는 임시저장만 지웁니다.
+async function cleanupTestDrafts() {
+  // 기본은 [자동화 테스트]/[점검] 시험 글. --title-prefix "제목 앞부분" 으로 특정 글만 지정할 수도 있어요.
+  const prefix = opt('title-prefix');
+  const MINE = prefix ? new RegExp('^' + prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) : /^\[(자동화 테스트|점검)\]/;
+  const { ctx, page } = await openBrowser();
+  try {
+    await ensureLoggedIn(page, { interactive: false });
+    await page.waitForTimeout(3500);
+    // 기본 핸들러(모든 확인창 취소)를 빼고, 삭제 확인창만 수락합니다. 그 밖의 확인창(이어쓰기 등)은 계속 취소.
+    page.removeAllListeners('dialog');
+    page.on('dialog', (d) => { if (/삭제/.test(d.message())) d.accept().catch(() => {}); else d.dismiss().catch(() => {}); });
+    await page.locator('a.count').first().click();
+    await page.waitForTimeout(1200);
+    const titles = async () => (await page.locator('.info_editor a.link_info').allInnerTexts()).map((t) => t.trim());
+    const before = await titles();
+    let deleted = 0;
+    for (let guard = 0; guard < 50; guard++) {
+      const rows = page.locator('.info_editor');
+      const n = await rows.count();
+      let hit = -1; let t = '';
+      for (let i = 0; i < n; i++) { const x = (await rows.nth(i).locator('a.link_info').innerText()).trim(); if (MINE.test(x)) { hit = i; t = x; break; } }
+      if (hit < 0) break;
+      await rows.nth(hit).hover();
+      await rows.nth(hit).locator('button.ico_trash').click({ timeout: 5000 });
+      await page.waitForTimeout(1500);
+      if ((await titles()).length < n) { deleted++; log('삭제:', t); } else { log('삭제되지 않아 중단:', t); break; }
+    }
+    log('임시저장 ' + before.length + '개 중 시험 글 ' + deleted + '개를 삭제했어요. 남은 글: ' + (before.length - deleted) + '개');
+  } finally { await ctx.close().catch(() => {}); }
 }
 
 // ---------------- 기록 파일 ----------------
@@ -198,7 +364,7 @@ async function saveDraft(page) {
       try { body = JSON.parse(q.postData() || '{}'); } catch (e) { /* 무시 */ }
       page.off('response', onResponse);
       clearTimeout(timer);
-      resolve({ status: r.status(), textLen: String(body.content || '').replace(/<[^>]*>/g, '').trim().length, overwrote: /\/\d+$/.test(r.url()) });
+      resolve({ status: r.status(), textLen: String(body.content || '').replace(/<[^>]*>/g, '').trim().length, tables: (String(body.content || '').match(/<table[\s>]/gi) || []).length, tags: body.tags || '', overwrote: /\/\d+$/.test(r.url()) });
     };
     page.on('response', onResponse);
   });
@@ -210,7 +376,7 @@ async function saveDraft(page) {
   const serverOk = !!req && req.status === 200 && req.textLen > 0;
   const grew = after > before;
   const via = !req ? '저장 요청을 확인하지 못함' : !serverOk ? '서버 응답 ' + req.status + ', 본문 ' + req.textLen + '자' : !grew ? '서버는 받았지만 임시저장 개수가 늘지 않음(기존 글 덮어쓰기 의심)' : '서버 200 · 본문 ' + req.textLen + '자 · 개수 증가';
-  return { ok: serverOk && grew, before, after, via };
+  return { ok: serverOk && grew, before, after, via, tables: req ? req.tables : 0, tags: req ? req.tags : '', textLen: req ? req.textLen : 0 };
 }
 
 async function publishPublic(page) {
@@ -220,7 +386,8 @@ async function publishPublic(page) {
   if (flag('dry-run')) return { ok: label.includes('공개'), dry: true, label }; // 모의 실행: 발행 버튼은 누르지 않습니다.
   await page.locator('#publish-btn').click();
   await page.waitForURL((u) => !u.pathname.includes('/manage/newpost'), { timeout: 30000 }).catch(() => {});
-  return { ok: !page.url().includes('/manage/newpost'), url: page.url() };
+  const left = !page.url().includes('/manage/newpost');
+  return { ok: left, via: left ? '발행 후 화면 이동 확인' : '발행 버튼을 눌렀지만 화면이 이동하지 않음', url: page.url() };
 }
 
 async function upload(post, mode, { interactive }) {
@@ -248,6 +415,54 @@ async function upload(post, mode, { interactive }) {
   }
 
   if (flag('login')) { await serverSession(); log('서버 로그인 세션을 저장했어요.'); return; }
+
+  if (flag('approve-public')) {
+    const cfg = L.loadConfig(CONFIG_FILE);
+    cfg.publishMode = 'public'; cfg.approvedAt = new Date().toISOString();
+    L.saveConfig(CONFIG_FILE, cfg);
+    log('공개 발행을 승인했어요. 이제 --run 은 공개 발행으로 올립니다. (되돌리기: node publish.js --set-draft)');
+    return;
+  }
+  if (flag('set-draft')) {
+    const cfg = L.loadConfig(CONFIG_FILE);
+    cfg.publishMode = 'draft'; cfg.approvedAt = null;
+    L.saveConfig(CONFIG_FILE, cfg);
+    log('임시저장 모드로 되돌렸어요.');
+    return;
+  }
+
+  if (flag('status')) {
+    const cfg = L.loadConfig(CONFIG_FILE);
+    console.log('발행 방식:', cfg.publishMode === 'public' ? '공개 발행 (승인 ' + cfg.approvedAt + ')' : '임시저장');
+    const rows = await sb('GET', 'inbox_posts?select=status,source&limit=1000');
+    const by = {}; rows.forEach((r) => { const k = r.status + ' / ' + r.source; by[k] = (by[k] || 0) + 1; });
+    console.log('수신함:', Object.keys(by).length ? JSON.stringify(by) : '비어 있음');
+    const f = path.join(LOG_DIR, 'publish.jsonl');
+    if (fs.existsSync(f)) { console.log('최근 기록:'); fs.readFileSync(f, 'utf8').trim().split('\n').slice(-5).forEach((l) => console.log('  ' + l.slice(0, 200))); }
+    return;
+  }
+
+  if (flag('fallback')) {
+    const cfg = L.loadConfig(CONFIG_FILE);
+    cfg.fallbackGenerate = opt('fallback', 'on') !== 'off';
+    L.saveConfig(CONFIG_FILE, cfg);
+    log('Claude 대체 생성: ' + (cfg.fallbackGenerate ? '켬 (수신함이 비면 새 글을 생성해요)' : '끔'));
+    return;
+  }
+
+  if (flag('cleanup-tests')) { await cleanupTestDrafts(); return; }
+
+  if (flag('run')) {
+    if (await runInbox()) return;
+    const cfg = L.loadConfig(CONFIG_FILE);
+    log('앱 예약 대기열(--next)을 확인해요.' + (cfg.publishMode === 'public' ? '' : ' (공개 발행 승인 전이라 임시저장으로 처리)'));
+    try { await loadState(); } catch (e) {
+      if (/저장된 글이 없어요/.test(e.message)) { log('앱 대기열: 서버에 앱 데이터가 아직 없어서 건너뛰어요. (할 일이 없는 정상 상태)'); return; }
+      throw e;
+    }
+    argv.push('--next');
+    if (cfg.publishMode !== 'public' && !flag('draft')) argv.push('--draft');
+  }
 
   if (flag('test-draft')) {
     const stamp = new Date().toLocaleString('ko-KR');

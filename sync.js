@@ -120,7 +120,7 @@
     const s = await validSession();
     if (!s) return undefined;
     try {
-      const res = await fetch(SUPABASE_URL + '/rest/v1/inbox_posts?select=*&order=created_at.asc&limit=50', {
+      const res = await fetch(SUPABASE_URL + '/rest/v1/inbox_posts?select=*&order=created_at.desc&limit=100', {
         headers: { apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + s.access },
       });
       return res.ok ? await res.json() : undefined;

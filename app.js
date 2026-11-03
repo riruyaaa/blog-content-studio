@@ -577,10 +577,24 @@
     const src = String(text || '').replace(/\r\n?/g, '\n').trim();
     if (/<(h[1-6]|p|ul|ol|div|table|section|article)[\s>]/i.test(src)) return src;
     const inline = (t) => escapeHtml(t).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    // 마크다운 표(헤더 줄 + |---| 구분 줄 + 데이터 줄)는 미리 table 로 바꿔 자리표시자로 둡니다.
+    const tables = [];
+    const cells = (l) => l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+    const srcLines = src.split('\n'); const kept = [];
+    for (let k = 0; k < srcLines.length; k++) {
+      const cur = srcLines[k].trim();
+      if (cur.charAt(0) === '|' && k + 1 < srcLines.length && /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/.test(srcLines[k + 1].trim())) {
+        const head = cells(cur); const rows = []; k += 2;
+        while (k < srcLines.length && srcLines[k].trim().charAt(0) === '|') { rows.push(cells(srcLines[k])); k++; }
+        k--;
+        tables.push('<table><thead><tr>' + head.map((h) => '<th>' + inline(h) + '</th>').join('') + '</tr></thead><tbody>' + rows.map((r) => '<tr>' + r.map((c) => '<td>' + inline(c) + '</td>').join('') + '</tr>').join('') + '</tbody></table>');
+        kept.push(''); kept.push('@@TABLE' + (tables.length - 1) + '@@'); kept.push('');
+      } else kept.push(srcLines[k]);
+    }
     const out = []; let list = null; let para = [];
     const flushPara = () => { if (para.length) { out.push('<p>' + para.map(inline).join('<br>') + '</p>'); para = []; } };
     const flushList = () => { if (list) { out.push('<' + list.tag + '>' + list.items.map((i) => '<li>' + inline(i) + '</li>').join('') + '</' + list.tag + '>'); list = null; } };
-    src.split('\n').forEach((raw) => {
+    kept.forEach((raw) => {
       const line = raw.trim();
       let m;
       if (!line) { flushPara(); flushList(); return; }
@@ -590,7 +604,7 @@
       flushList(); para.push(line);
     });
     flushPara(); flushList();
-    return out.join('\n');
+    return out.join('\n').replace(/<p>@@TABLE(\d+)@@<\/p>/g, (_, n) => tables[Number(n)]);
   }
 
   function openPasteModal() {
@@ -1258,7 +1272,7 @@
       <div class="pc-top"><span class="pill" style="background:${(blog.color || '#33456B')}22; color:${blog.color || '#33456B'}">${escapeHtml(blog.name || '')}</span></div>
       <div class="pc-title">${escapeHtml(p.title || '(제목 없음)')}</div>
       <div class="pc-excerpt">${escapeHtml(excerpt || '아직 작성된 내용이 없어요')}</div>
-      <div class="pc-meta"><span>${escapeHtml(p.category || '')}</span><span>·</span><span>${fmtRelative(p.updatedAt)}</span>${p.status === 'done' ? `<span>·</span><span>SEO ${p.seoScore || 0}점</span>` : ''}</div>
+      <div class="pc-meta"><span>${escapeHtml(p.category || '')}</span><span>·</span><span>${fmtRelative(p.updatedAt)}</span>${p.source ? `<span>·</span><span title="글이 들어온 경로">출처: ${escapeHtml(SOURCE_LABEL[p.source] || p.source)}</span>` : ''}${p.status === 'done' ? `<span>·</span><span>SEO ${p.seoScore || 0}점</span>` : ''}</div>
       ${p.platform === 'tistory' ? publishBoxHtml(p) : ''}
       <div class="pc-footer">
         <div class="pc-tags">${tags.map((t) => `<span class="tag-chip">${escapeHtml(t)}</span>`).join('')}</div>
@@ -1266,6 +1280,7 @@
       </div>
     </div>`;
   }
+  const SOURCE_LABEL = { 'chatgpt-email': 'ChatGPT(메일)', claude: 'Claude 생성', paste: '붙여넣기', chatgpt: 'ChatGPT', test: '시험' };
   const PUBLISH_STATE_LABEL = { drafted: '📝 티스토리 임시저장됨', published: '✅ 티스토리 발행됨', failed: '⚠️ 업로드 실패' };
   function publishBoxHtml(p) {
     const mode = p.publishMode === 'public' ? 'public' : 'draft';

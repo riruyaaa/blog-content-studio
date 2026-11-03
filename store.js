@@ -194,29 +194,39 @@
     return false;
   }
 
-  // 수신함의 글을 내 글로 가져옵니다. 서버 저장이 확인된 뒤에만 수신함에서 지웁니다. 가져온 개수를 돌려줍니다.
+  // 수신함 글을 내 글 목록에 반영합니다. 수신함은 자동 발행 대기열이라 여기서는 지우지 않고 복사/상태 갱신만 합니다.
+  // (발행·재시도·중복 판정은 tools/tistory/publish.js --run 이 수신함에서 직접 처리합니다.)
+  const INBOX_STATE = { drafted: 'drafted', published: 'published', failed: 'failed' };
   async function importInbox() {
     if (!global.Sync || !global.Sync.ready()) return 0;
     const rows = await global.Sync.fetchInbox();
     if (!rows || !rows.length) return 0;
     const d = load();
-    const have = new Set(d.posts.map((p) => p.inboxId).filter(Boolean));
-    let added = 0;
+    const byInbox = new Map(d.posts.filter((p) => p.inboxId).map((p) => [p.inboxId, p]));
+    let changed = 0;
     rows.forEach((r) => {
-      if (have.has(r.id)) return;
+      const state = INBOX_STATE[r.status] || '';
+      const existing = byInbox.get(r.id);
+      if (existing) {
+        if ((existing.publishState || '') !== state || (existing.publishedUrl || '') !== (r.published_url || '')) {
+          existing.publishState = state; existing.publishedUrl = r.published_url || '';
+          if (state === 'published') existing.status = 'done';
+          changed++;
+        }
+        return;
+      }
       const now = Date.now();
       d.posts.unshift({
-        id: uid('post'), inboxId: r.id, source: 'chatgpt', blogId: d.activeBlogId, platform: 'tistory', status: 'writing',
+        id: uid('post'), inboxId: r.id, source: r.source || 'unknown', topic: r.topic || '', blogId: d.activeBlogId, platform: 'tistory',
+        status: state === 'published' ? 'done' : 'writing', publishState: state, publishedUrl: r.published_url || '', queued: false,
         title: r.title, content: r.content, tags: r.tags || '', metaDescription: r.meta_description || '',
         category: '', mainKeyword: '', subKeywords: '', purpose: '', targetReader: '', tone: '', lengthPref: '보통', aiRequest: '',
         options: {}, favorite: false, seoScore: 0, thumbnailPhrases: [], faq: [], cardNews: [], createdAt: now, updatedAt: now,
       });
-      added++;
+      changed++;
     });
-    if (added) persist();
-    if (!(await flushPush())) return added;
-    await global.Sync.deleteInbox(rows.map((r) => r.id));
-    return added;
+    if (changed) { persist(); await flushPush(); }
+    return changed;
   }
 
   document.addEventListener('visibilitychange', () => {
