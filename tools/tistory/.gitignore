@@ -1,2 +1,6 @@
 .profile/
 node_modules/
+.session.json
+.cookies.json
+.ledger.json
+logs/

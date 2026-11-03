@@ -518,6 +518,7 @@
         <div style="display:flex; gap:10px; margin-top:24px; align-items:center; flex-wrap:wrap;">
           <button class="btn btn-primary btn-lg" id="s1SubmitBtn" style="flex:1;">✨ AI로 글 생성하기</button>
           <button class="btn btn-secondary btn-lg" id="s1SkipBtn">빈 글로 바로 시작</button>
+          <button class="btn btn-secondary btn-lg" id="s1PasteBtn">📋 글 붙여넣기</button>
         </div>
       </div>
     </div>`;
@@ -532,6 +533,7 @@
     });
     $('#s1SubmitBtn', main).addEventListener('click', () => submitStep1(false));
     $('#s1SkipBtn', main).addEventListener('click', () => submitStep1(true));
+    $('#s1PasteBtn', main).addEventListener('click', openPasteModal);
   }
   function noBlogState() {
     return `<div class="view"><div class="empty-state"><div class="es-ic">🗂️</div><div class="es-t">먼저 블로그를 추가해주세요</div><div class="es-d">블로그 프로필을 만들면 그에 맞는 말투와 설정으로 글을 쓸 수 있어요.</div>
@@ -569,6 +571,64 @@
     const options = {}; OPTION_DEFS.forEach((o) => { options[o.key] = $('#s1opt_' + o.key, main).checked; });
     return { topic, mainKeyword, subKeywords, postType, purpose, targetReader, tone, lengthPref, platform, aiRequest, options, blog: getActiveBlog() };
   }
+  // ---------------- 글 붙여넣기 (ChatGPT 등에서 복사한 글) ----------------
+  // HTML이면 그대로 두고, 아니면 마크다운/일반 텍스트를 HTML로 바꿉니다.
+  function textToHtml(text) {
+    const src = String(text || '').replace(/\r\n?/g, '\n').trim();
+    if (/<(h[1-6]|p|ul|ol|div|table|section|article)[\s>]/i.test(src)) return src;
+    const inline = (t) => escapeHtml(t).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    const out = []; let list = null; let para = [];
+    const flushPara = () => { if (para.length) { out.push('<p>' + para.map(inline).join('<br>') + '</p>'); para = []; } };
+    const flushList = () => { if (list) { out.push('<' + list.tag + '>' + list.items.map((i) => '<li>' + inline(i) + '</li>').join('') + '</' + list.tag + '>'); list = null; } };
+    src.split('\n').forEach((raw) => {
+      const line = raw.trim();
+      let m;
+      if (!line) { flushPara(); flushList(); return; }
+      if ((m = line.match(/^(#{1,6})\s+(.*)$/))) { flushPara(); flushList(); const h = m[1].length >= 3 ? 3 : 2; out.push('<h' + h + '>' + inline(m[2]) + '</h' + h + '>'); return; }
+      if ((m = line.match(/^[-*•]\s+(.*)$/))) { flushPara(); if (!list || list.tag !== 'ul') { flushList(); list = { tag: 'ul', items: [] }; } list.items.push(m[1]); return; }
+      if ((m = line.match(/^\d+[.)]\s+(.*)$/))) { flushPara(); if (!list || list.tag !== 'ol') { flushList(); list = { tag: 'ol', items: [] }; } list.items.push(m[1]); return; }
+      flushList(); para.push(line);
+    });
+    flushPara(); flushList();
+    return out.join('\n');
+  }
+
+  function openPasteModal() {
+    openModal(`
+      <div class="modal-head"><h3>📋 글 붙여넣기</h3><button class="btn-icon" id="pmClose">✕</button></div>
+      <div class="modal-body">
+        <div class="field"><div class="field-label">제목</div><input class="input" id="ppTitle" placeholder="글 제목"></div>
+        <div class="field"><div class="field-label">본문 (HTML · 마크다운 · 일반 텍스트 모두 가능)</div><textarea class="textarea" id="ppBody" style="min-height:220px;" placeholder="ChatGPT에서 복사한 글을 붙여넣으세요"></textarea></div>
+        <div class="field"><div class="field-label">태그 (쉼표로 구분)</div><input class="input" id="ppTags" placeholder="제주도여행, 제주맛집"></div>
+        <div class="field"><div class="field-label">메타 설명 (선택)</div><input class="input" id="ppMeta"></div>
+        <div class="field"><div class="field-label">티스토리 발행 방식</div>
+          <select class="select" id="ppMode"><option value="draft">임시저장 (공개하지 않음)</option><option value="public">공개 발행</option></select>
+        </div>
+        <label class="check-row" style="display:flex; gap:8px; align-items:center; margin-top:8px;"><input type="checkbox" id="ppQueue"> 예약 발행 대기열에 넣기 (정해진 시간에 자동 업로드)</label>
+      </div>
+      <div class="modal-foot"><button class="btn btn-secondary" id="ppCancel">취소</button><button class="btn btn-primary" id="ppSave">저장</button></div>`, {
+      onMount: (host) => {
+        $('#pmClose', host).addEventListener('click', closeModal);
+        $('#ppCancel', host).addEventListener('click', closeModal);
+        $('#ppSave', host).addEventListener('click', () => {
+          const title = $('#ppTitle', host).value.trim();
+          const body = $('#ppBody', host).value;
+          if (!title || !body.trim()) { toast('제목과 본문을 입력해주세요'); return; }
+          const now = Date.now();
+          const post = {
+            blogId: state.activeBlogId, platform: 'tistory', status: 'writing', source: 'paste',
+            title, content: textToHtml(body), tags: $('#ppTags', host).value.trim(), metaDescription: $('#ppMeta', host).value.trim(),
+            publishMode: $('#ppMode', host).value, queued: $('#ppQueue', host).checked, publishState: '',
+            category: '', mainKeyword: '', subKeywords: '', purpose: '', targetReader: '', tone: '', lengthPref: '보통', aiRequest: '',
+            options: {}, favorite: false, seoScore: 0, thumbnailPhrases: [], faq: [], cardNews: [], createdAt: now, updatedAt: now,
+          };
+          Store.savePost(post).then((saved) => { state.posts.unshift(saved); closeModal(); toast('글을 저장했어요'); navigate('writing'); });
+        });
+        $('#ppTitle', host).focus();
+      },
+    });
+  }
+
   function submitStep1(skipAi) {
     const main = $('#mainView');
     const params = collectStep1Params(main);
@@ -1199,14 +1259,32 @@
       <div class="pc-title">${escapeHtml(p.title || '(제목 없음)')}</div>
       <div class="pc-excerpt">${escapeHtml(excerpt || '아직 작성된 내용이 없어요')}</div>
       <div class="pc-meta"><span>${escapeHtml(p.category || '')}</span><span>·</span><span>${fmtRelative(p.updatedAt)}</span>${p.status === 'done' ? `<span>·</span><span>SEO ${p.seoScore || 0}점</span>` : ''}</div>
+      ${p.platform === 'tistory' ? publishBoxHtml(p) : ''}
       <div class="pc-footer">
         <div class="pc-tags">${tags.map((t) => `<span class="tag-chip">${escapeHtml(t)}</span>`).join('')}</div>
         <button class="btn-icon btn-sm" data-del="${p.id}" title="삭제">🗑</button>
       </div>
     </div>`;
   }
+  const PUBLISH_STATE_LABEL = { drafted: '📝 티스토리 임시저장됨', published: '✅ 티스토리 발행됨', failed: '⚠️ 업로드 실패' };
+  function publishBoxHtml(p) {
+    const mode = p.publishMode === 'public' ? 'public' : 'draft';
+    return `<div class="pc-publish" data-pub>
+      <select data-pub-mode="${p.id}"><option value="draft" ${mode === 'draft' ? 'selected' : ''}>임시저장</option><option value="public" ${mode === 'public' ? 'selected' : ''}>공개 발행</option></select>
+      <label><input type="checkbox" data-pub-queue="${p.id}" ${p.queued ? 'checked' : ''}> 예약 대기</label>
+      <span class="pc-pubstate">${PUBLISH_STATE_LABEL[p.publishState] || ''}</span>
+    </div>`;
+  }
+  function savePublishSetting(id, patch) {
+    const post = state.posts.find((x) => x.id === id);
+    if (!post) return;
+    Object.assign(post, patch);
+    Store.savePost(post).then(() => toast('발행 설정을 저장했어요'));
+  }
   function bindPostCardEvents(root) {
-    $all('[data-open]', root).forEach((c) => c.addEventListener('click', (e) => { if (e.target.closest('[data-fav],[data-del]')) return; openEditor(c.dataset.open); }));
+    $all('[data-pub-mode]', root).forEach((el) => el.addEventListener('change', () => savePublishSetting(el.dataset.pubMode, { publishMode: el.value })));
+    $all('[data-pub-queue]', root).forEach((el) => el.addEventListener('change', () => savePublishSetting(el.dataset.pubQueue, { queued: el.checked })));
+    $all('[data-open]', root).forEach((c) => c.addEventListener('click', (e) => { if (e.target.closest('[data-fav],[data-del],[data-pub]')) return; openEditor(c.dataset.open); }));
     $all('[data-fav]', root).forEach((b) => b.addEventListener('click', (e) => {
       e.stopPropagation();
       Store.toggleFavoritePost(b.dataset.fav).then((isFav) => {
