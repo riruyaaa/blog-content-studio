@@ -1,0 +1,70 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>블로그 콘텐츠 스튜디오</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=Noto+Sans+KR:wght@400;500;600;700;900&family=IBM+Plex+Mono:wght@500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+
+<div id="toast-host"></div>
+
+<div id="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-mark">B</div>
+      <div>
+        <div class="brand-name">콘텐츠 스튜디오</div>
+        <div class="brand-sub">나만의 블로그 작업실</div>
+      </div>
+    </div>
+
+    <nav class="sidebar-nav" id="sidebarNav">
+      <button class="nav-item" data-view="dashboard"><span class="ic">🏠</span>대시보드</button>
+      <button class="nav-item" data-view="new-post"><span class="ic">✍️</span>새 글 작성</button>
+      <button class="nav-item" data-view="writing"><span class="ic">📚</span>작성 중인 글</button>
+      <button class="nav-item" data-view="done"><span class="ic">✅</span>완성된 글</button>
+      <button class="nav-item" data-view="ideas"><span class="ic">💡</span>주제 아이디어</button>
+      <button class="nav-item" data-view="calendar"><span class="ic">📅</span>콘텐츠 캘린더</button>
+      <button class="nav-item" data-view="favorites"><span class="ic">⭐</span>즐겨찾기</button>
+      <div class="nav-divider"></div>
+      <button class="nav-item" data-view="settings"><span class="ic">⚙️</span>블로그 설정</button>
+    </nav>
+
+    <div class="sidebar-footer">
+      <button class="nav-item" id="sidebarThemeToggle"><span class="ic">🌙</span><span id="sidebarThemeLabel">다크 모드</span></button>
+    </div>
+  </aside>
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+  <header class="topbar">
+    <button class="icon-btn" id="menuToggle" title="메뉴" style="display:none">☰</button>
+    <div class="blog-switcher" id="blogSwitcher"></div>
+
+    <div class="topbar-search">
+      <span>🔍</span>
+      <input id="globalSearch" placeholder="글 제목·키워드로 검색" autocomplete="off">
+    </div>
+
+    <div class="topbar-actions">
+      <button class="btn btn-primary btn-sm" id="newPostBtn">＋ 새 글 작성</button>
+      <button class="icon-btn" id="themeToggle" title="다크 모드 전환">🌙</button>
+      <button class="icon-btn" id="panelToggle" title="AI·SEO 패널" style="display:none">🧭</button>
+    </div>
+  </header>
+
+  <main class="main-view scroll" id="mainView"></main>
+
+  <aside class="right-panel scroll" id="rightPanel"></aside>
+</div>
+<div class="panel-backdrop" id="panelBackdrop"></div>
+
+<div id="modalHost"></div>
+<div id="finalHost"></div>
+
+<script src="store.js"></script>
+<script src="seo.js"></script>
+<script src="icons.js"></script>
+<script src="integrations.js"></script>
+<script src="ai.js"></script>
+<script src="app.js"></script>
+
+</body></html>
