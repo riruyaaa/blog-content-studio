@@ -1,5 +1,6 @@
 -- ChatGPT(커스텀 GPT Actions)가 보낸 글을 받는 수신함. SQL Editor에서 한 번 실행하세요.
--- __TOKEN_HASH__ 는 비밀 토큰의 SHA-256 해시로 바꿔서 실행합니다. (토큰 원문은 저장소에 두지 않습니다.)
+-- 비밀 토큰은 요청 헤더(x-ingest-token)로만 받고, 서버에는 SHA-256 해시만 둡니다.
+-- 아래 해시 자리표시자(__TOKEN_HASH__)는 실행할 때 새 토큰의 해시로 바꿉니다. 토큰 원문은 저장소에 두지 않습니다.
 
 create table if not exists public.inbox_posts (
   id uuid primary key default gen_random_uuid(),
@@ -13,22 +14,29 @@ create table if not exists public.inbox_posts (
 
 alter table public.inbox_posts enable row level security;
 
+drop policy if exists "own inbox select" on public.inbox_posts;
 create policy "own inbox select" on public.inbox_posts
   for select to authenticated using (user_id = auth.uid());
 
+drop policy if exists "own inbox delete" on public.inbox_posts;
 create policy "own inbox delete" on public.inbox_posts
   for delete to authenticated using (user_id = auth.uid());
 
+-- 이전 버전(본문에 비밀 토큰을 받던 함수)은 없앱니다.
+drop function if exists public.ingest_post(text, text, text, text, text);
+
 create or replace function public.ingest_post(
-  p_secret text, p_title text, p_content text,
+  p_title text, p_content text,
   p_tags text default '', p_meta_description text default ''
 ) returns json
 language plpgsql security definer set search_path = public as $$
 declare
+  presented text;
   owner_id uuid;
   new_id uuid;
 begin
-  if encode(sha256(convert_to(coalesce(p_secret, ''), 'utf8')), 'hex') <> '__TOKEN_HASH__' then
+  presented := coalesce((nullif(current_setting('request.headers', true), '')::json) ->> 'x-ingest-token', '');
+  if encode(sha256(convert_to(presented, 'utf8')), 'hex') <> '__TOKEN_HASH__' then
     raise exception 'unauthorized' using errcode = '28000';
   end if;
   if coalesce(trim(p_title), '') = '' or coalesce(trim(p_content), '') = '' then
@@ -51,5 +59,5 @@ begin
 end;
 $$;
 
-revoke all on function public.ingest_post(text, text, text, text, text) from public;
-grant execute on function public.ingest_post(text, text, text, text, text) to anon, authenticated;
+revoke all on function public.ingest_post(text, text, text, text) from public;
+grant execute on function public.ingest_post(text, text, text, text) to anon, authenticated;

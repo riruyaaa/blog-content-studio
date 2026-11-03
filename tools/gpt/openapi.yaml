@@ -2,26 +2,39 @@ openapi: 3.1.0
 info:
   title: 콘텐츠 스튜디오 글 수신함
   description: 완성한 블로그 글을 콘텐츠 스튜디오의 수신함으로 보냅니다.
-  version: 1.0.0
+  version: 2.0.0
 servers:
   - url: https://lyhmuimkmiinscmbagad.supabase.co
+components:
+  securitySchemes:
+    ingestToken:
+      type: apiKey
+      in: header
+      name: x-ingest-token
+security:
+  - ingestToken: []
 paths:
   /rest/v1/rpc/ingest_post:
     post:
       operationId: sendPostToStudio
       summary: 완성된 글을 콘텐츠 스튜디오로 보냅니다
       description: 글을 다 쓰고 사용자가 보내기를 원할 때 한 번 호출합니다.
+      parameters:
+        - name: apikey
+          in: header
+          required: true
+          description: 공개 키입니다. 항상 이 값을 그대로 보냅니다.
+          schema:
+            type: string
+            enum: ["sb_publishable_oJcqzf_P8GQUettDRe3sEA_unZQCeL_"]
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [p_secret, p_title, p_content]
+              required: [p_title, p_content]
               properties:
-                p_secret:
-                  type: string
-                  description: 지침에 적힌 전송 비밀 토큰을 그대로 넣습니다.
                 p_title:
                   type: string
                   description: 글 제목
