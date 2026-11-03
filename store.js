@@ -7,6 +7,8 @@
 
 (function (global) {
   const DB_KEY = 'bcs_data_v2';
+  const TS_KEY = 'bcs_sync_ts';
+  const PUSH_DELAY = 1500;
   const uid = (p) => (p || 'id') + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
   function seedData() {
@@ -133,25 +135,68 @@
         if (!cache.blogs || !cache.blogs.length) cache.blogs = seed.blogs;
       } else {
         cache = seedData();
-        persist();
+        persist(true);
       }
     } catch (e) {
       console.warn('저장된 데이터를 불러오지 못해 초기 데이터로 시작합니다.', e);
       cache = seedData();
-      persist();
+      persist(true);
     }
     return cache;
   }
 
-  function persist() {
+  let pushTimer = null;
+  let pushTs = 0;
+
+  function localTs() { return Number(localStorage.getItem(TS_KEY) || 0); }
+
+  // fromSeed가 true면 사용자가 바꾼 게 아니므로 서버 동기화 대상에서 제외합니다.
+  function persist(fromSeed) {
     try {
       localStorage.setItem(DB_KEY, JSON.stringify(cache));
+      if (!fromSeed && global.Sync && global.Sync.ready()) {
+        pushTs = Date.now();
+        localStorage.setItem(TS_KEY, String(pushTs));
+        clearTimeout(pushTimer);
+        pushTimer = setTimeout(flushPush, PUSH_DELAY);
+      }
       return true;
     } catch (e) {
       console.error('로컬 저장 실패', e);
       return false;
     }
   }
+
+  function flushPush(opts) {
+    clearTimeout(pushTimer);
+    pushTimer = null;
+    if (!pushTs) return Promise.resolve(false);
+    return global.Sync.push(cache, pushTs, opts);
+  }
+
+  // 서버와 비교해 더 최신 쪽을 따릅니다. 서버 데이터를 받아왔으면 true를 돌려줍니다.
+  async function syncNow() {
+    if (!global.Sync || !global.Sync.ready()) return false;
+    const remote = await global.Sync.fetchRemote();
+    if (remote === undefined) return false;
+    const lts = localTs();
+    if (remote && remote.ts > lts) {
+      const keep = {};
+      global.Sync.LOCAL_ONLY.forEach((k) => { keep[k] = (cache && cache[k]) || ''; });
+      cache = { ...remote.data, ...keep };
+      localStorage.setItem(DB_KEY, JSON.stringify(cache));
+      localStorage.setItem(TS_KEY, String(remote.ts));
+      return true;
+    }
+    pushTs = lts || Date.now();
+    if (!lts) localStorage.setItem(TS_KEY, String(pushTs));
+    await flushPush();
+    return false;
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && pushTimer) flushPush({ keepalive: true });
+  });
 
   function delay(v) {
     // 실제 API 전환 시 자연스럽게 async 흐름을 유지하기 위한 헬퍼
@@ -162,7 +207,12 @@
     uid,
     dateStr,
 
-    init() { load(); return delay(true); },
+    init() {
+      load();
+      const timeout = new Promise((r) => setTimeout(() => r(false), 4000));
+      return Promise.race([syncNow(), timeout]).catch(() => false).then(() => true);
+    },
+    syncNow,
 
     // ---------- Blogs ----------
     getBlogs() { return delay([...load().blogs]); },

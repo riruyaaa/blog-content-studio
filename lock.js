@@ -21,6 +21,14 @@
   function remembered() { try { return localStorage.getItem(KEY) === HASH; } catch (e) { return false; } }
   function remember() { try { localStorage.setItem(KEY, HASH); } catch (e) { /* 무시 */ } }
 
+  // 잠금을 푼 비밀번호로 서버에 로그인해 기기 간 데이터를 맞춥니다. 서버 데이터가 더 최신이면 새로고침합니다.
+  async function connectSync(pw) {
+    try {
+      if (!window.Sync || !(await window.Sync.login(pw))) return;
+      if (await window.Store.syncNow()) location.reload();
+    } catch (e) { console.warn('동기화 연결 실패', e); }
+  }
+
   if (remembered()) return;
 
   const style = document.createElement('style');
@@ -50,6 +58,7 @@
     catch (ex) { err.textContent = '이 브라우저에서는 잠금 해제를 지원하지 않아요 (HTTPS 필요)'; return; }
     if (h === HASH) {
       remember();
+      connectSync(document.getElementById('lockPw').value);
       box.remove();
       style.remove();
       document.body.style.overflow = '';
