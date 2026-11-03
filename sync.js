@@ -6,8 +6,8 @@
    - SUPABASE_URL / SUPABASE_ANON_KEY가 비어 있으면 동기화는 꺼지고 로컬 저장만 씁니다.
    ========================================================= */
 (function (global) {
-  const SUPABASE_URL = '';
-  const SUPABASE_ANON_KEY = '';
+  const SUPABASE_URL = 'https://lyhmuimkmiinscmbagad.supabase.co';
+  const SUPABASE_ANON_KEY = 'sb_publishable_oJcqzf_P8GQUettDRe3sEA_unZQCeL_';
   const SYNC_EMAIL = 'studio@example.com';
 
   const SESSION_KEY = 'bcs_sync_session_v1';

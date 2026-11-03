@@ -29,7 +29,10 @@
     } catch (e) { console.warn('동기화 연결 실패', e); }
   }
 
-  if (remembered()) return;
+  // 이미 잠금을 푼 기기라도, 서버 동기화 세션이 없으면 한 번 더 입력받아 로그인합니다.
+  function hasSyncSession() { try { return !!localStorage.getItem('bcs_sync_session_v1'); } catch (e) { return false; } }
+
+  if (remembered() && hasSyncSession()) return;
 
   const style = document.createElement('style');
   style.textContent = '#lockScreen{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:#faf9f5;font-family:"Noto Sans KR",sans-serif}'
