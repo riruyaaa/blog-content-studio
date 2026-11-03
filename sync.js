@@ -115,5 +115,34 @@
     }
   }
 
-  global.Sync = { configured, ready, login, fetchRemote, push, LOCAL_ONLY };
+  // 수신함(inbox_posts): ChatGPT 등 외부에서 보낸 글. 실패하면 undefined.
+  async function fetchInbox() {
+    const s = await validSession();
+    if (!s) return undefined;
+    try {
+      const res = await fetch(SUPABASE_URL + '/rest/v1/inbox_posts?select=*&order=created_at.asc&limit=50', {
+        headers: { apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + s.access },
+      });
+      return res.ok ? await res.json() : undefined;
+    } catch (e) {
+      console.warn('수신함을 불러오지 못했어요', e);
+      return undefined;
+    }
+  }
+
+  async function deleteInbox(ids) {
+    const s = await validSession();
+    if (!s || !ids.length) return false;
+    try {
+      const res = await fetch(SUPABASE_URL + '/rest/v1/inbox_posts?id=in.(' + ids.join(',') + ')', {
+        method: 'DELETE',
+        headers: { apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + s.access },
+      });
+      return res.ok;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  global.Sync = { configured, ready, login, fetchRemote, push, fetchInbox, deleteInbox, LOCAL_ONLY };
 })(window);

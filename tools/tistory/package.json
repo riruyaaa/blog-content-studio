@@ -1,0 +1,6 @@
+{
+  "name": "tistory-publisher",
+  "private": true,
+  "description": "콘텐츠 스튜디오의 완성된 글을 티스토리 글쓰기 화면에 채워 넣는 로컬 스크립트",
+  "dependencies": { "playwright-core": "1.49.1" }
+}

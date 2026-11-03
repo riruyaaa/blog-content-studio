@@ -1,0 +1,48 @@
+openapi: 3.1.0
+info:
+  title: 콘텐츠 스튜디오 글 수신함
+  description: 완성한 블로그 글을 콘텐츠 스튜디오의 수신함으로 보냅니다.
+  version: 1.0.0
+servers:
+  - url: https://lyhmuimkmiinscmbagad.supabase.co
+paths:
+  /rest/v1/rpc/ingest_post:
+    post:
+      operationId: sendPostToStudio
+      summary: 완성된 글을 콘텐츠 스튜디오로 보냅니다
+      description: 글을 다 쓰고 사용자가 보내기를 원할 때 한 번 호출합니다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [p_secret, p_title, p_content]
+              properties:
+                p_secret:
+                  type: string
+                  description: 지침에 적힌 전송 비밀 토큰을 그대로 넣습니다.
+                p_title:
+                  type: string
+                  description: 글 제목
+                p_content:
+                  type: string
+                  description: 글 본문 HTML (h2, h3, p, ul, ol, strong, table 등. html/head/body 태그와 h1은 쓰지 않습니다)
+                p_tags:
+                  type: string
+                  description: 쉼표로 구분한 태그. 예) 제주도여행, 제주맛집
+                p_meta_description:
+                  type: string
+                  description: 검색 결과에 보일 120자 안팎의 요약문
+      responses:
+        "200":
+          description: 저장됨
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  id:
+                    type: string

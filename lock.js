@@ -25,7 +25,9 @@
   async function connectSync(pw) {
     try {
       if (!window.Sync || !(await window.Sync.login(pw))) return;
-      if (await window.Store.syncNow()) location.reload();
+      const applied = await window.Store.syncNow();
+      const imported = await window.Store.importInbox();
+      if (applied || imported) location.reload();
     } catch (e) { console.warn('동기화 연결 실패', e); }
   }
 

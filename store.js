@@ -194,6 +194,31 @@
     return false;
   }
 
+  // 수신함의 글을 내 글로 가져옵니다. 서버 저장이 확인된 뒤에만 수신함에서 지웁니다. 가져온 개수를 돌려줍니다.
+  async function importInbox() {
+    if (!global.Sync || !global.Sync.ready()) return 0;
+    const rows = await global.Sync.fetchInbox();
+    if (!rows || !rows.length) return 0;
+    const d = load();
+    const have = new Set(d.posts.map((p) => p.inboxId).filter(Boolean));
+    let added = 0;
+    rows.forEach((r) => {
+      if (have.has(r.id)) return;
+      const now = Date.now();
+      d.posts.unshift({
+        id: uid('post'), inboxId: r.id, source: 'chatgpt', blogId: d.activeBlogId, platform: 'tistory', status: 'writing',
+        title: r.title, content: r.content, tags: r.tags || '', metaDescription: r.meta_description || '',
+        category: '', mainKeyword: '', subKeywords: '', purpose: '', targetReader: '', tone: '', lengthPref: '보통', aiRequest: '',
+        options: {}, favorite: false, seoScore: 0, thumbnailPhrases: [], faq: [], cardNews: [], createdAt: now, updatedAt: now,
+      });
+      added++;
+    });
+    if (added) persist();
+    if (!(await flushPush())) return added;
+    await global.Sync.deleteInbox(rows.map((r) => r.id));
+    return added;
+  }
+
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden' && pushTimer) flushPush({ keepalive: true });
   });
@@ -210,9 +235,10 @@
     init() {
       load();
       const timeout = new Promise((r) => setTimeout(() => r(false), 4000));
-      return Promise.race([syncNow(), timeout]).catch(() => false).then(() => true);
+      return Promise.race([syncNow().then(() => importInbox()), timeout]).catch(() => false).then(() => true);
     },
     syncNow,
+    importInbox,
 
     // ---------- Blogs ----------
     getBlogs() { return delay([...load().blogs]); },
