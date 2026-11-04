@@ -28,8 +28,21 @@ const BRIEF = fs.readFileSync(path.join(__dirname, 'brief.md'), 'utf8');
 const MAX_TRIES = 3;
 
 const today = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
-const slot = opt('slot', new Date().getHours() < 12 ? 'am' : 'pm');
-const externalId = 'claude-' + today() + '-' + slot;
+// 슬롯(am/pm)은 실행 시각으로 정하되, 12시 이후에 켜진 날 오전 글이 비어 있으면 오전 슬롯부터 채웁니다. (놓친 실행 따라잡기)
+let slot = opt('slot');
+let externalId = '';
+async function resolveSlot() {
+  if (!slot) {
+    slot = new Date().getHours() < 12 ? 'am' : 'pm';
+    if (slot === 'pm' && !flag('dry')) {
+      try {
+        const am = await S.sbGet('inbox_posts?select=id&source=eq.claude&external_id=eq.claude-' + today() + '-am');
+        if (!am.length) slot = 'am';
+      } catch (e) { /* 확인 실패 시 pm 유지 */ }
+    }
+  }
+  externalId = 'claude-' + today() + '-' + slot;
+}
 
 function claudeBin() {
   if (process.env.CLAUDE_BIN) return process.env.CLAUDE_BIN;
@@ -120,6 +133,7 @@ function validate(a) {
 }
 
 (async () => {
+  await resolveSlot();
   if (!flag('dry')) {
     const existing = await S.sbGet('inbox_posts?select=id,status&source=eq.claude&external_id=eq.' + externalId);
     if (existing.length) { log('이 슬롯(' + externalId + ')의 글이 이미 있어서 만들지 않아요.'); return; }

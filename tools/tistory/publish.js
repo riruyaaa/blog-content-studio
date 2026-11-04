@@ -22,6 +22,8 @@ const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright-core');
 const L = require('./lib');
+const os = require('os');
+const CARD = require('./card');
 
 const argv = process.argv.slice(2);
 const flag = (n) => argv.includes('--' + n);
@@ -162,12 +164,14 @@ async function publishRow(row, mode, cfg) {
   await patchRow(row.id, { status: 'publishing', attempts: attempt, last_error: 'publishing@' + new Date().toISOString() });
   log('발행 시도 ' + attempt + '/' + cfg.maxAttempts + ':', row.title, '(출처:', row.source + ', 방식:', mode === 'public' ? '공개 발행' : '임시저장', ')');
   try {
-    const r = await upload({ title: row.title, tags: row.tags, content: L.prepareContent(row, cfg) }, mode, { interactive: false });
+    const card = cfg.card !== false && !flag('no-card') ? { title: row.title, tags: row.tags, blogName: cfg.cardLabel || 'RIRUME TRAVEL' } : null;
+    const r = await upload({ title: row.title, tags: row.tags, content: L.prepareContent(row, cfg), card }, mode, { interactive: false });
     if (!r.ok) throw new Error('저장 확인에 실패했어요: ' + (r.via || ''));
     // 임시저장 방식에서는 저장 요청에 표가 그대로 들어갔는지도 확인합니다. (본문 유실·변형 방지)
     const wantTables = (String(row.content).match(/<table[\s>]/gi) || []).length;
     if (mode === 'draft' && r.tables !== undefined && r.tables < wantTables) throw new Error('표가 저장되지 않았어요 (원문 ' + wantTables + '개 → 저장 ' + r.tables + '개)');
-    if (mode === 'draft') log('저장 확인: 본문 ' + r.textLen + '자, 표 ' + r.tables + '개, 태그 "' + r.tags + '"');
+    if (mode === 'draft' && card && r.images !== undefined && r.images < 1) throw new Error('대표 이미지 카드가 저장되지 않았어요');
+    if (mode === 'draft') log('저장 확인: 본문 ' + r.textLen + '자, 표 ' + r.tables + '개, 이미지 ' + r.images + '개, 태그 "' + r.tags + '"');
     const url = mode === 'public' ? await findPublishedUrl(row.title) : '';
     await patchRow(row.id, { status: mode === 'public' ? 'published' : 'drafted', published_url: url || null, published_at: new Date().toISOString(), last_error: null });
     log('성공:', row.title, mode === 'public' ? '→ ' + (url || '(URL은 RSS에 아직 안 보임)') : '→ 임시저장');
@@ -319,6 +323,30 @@ const draftCount = async (page) => {
   return m ? Number(m[1]) : 0;
 };
 
+// 대표 이미지 카드: 제목으로 PNG를 만들어 티스토리에 업로드하고, 편집기에 들어간 이미지 블록을 돌려줍니다.
+async function attachCard(page, spec) {
+  const png = await CARD.renderCard(page.context(), spec);
+  const tmp = path.join(os.tmpdir(), 'bcs-card-' + Date.now() + '.png');
+  fs.writeFileSync(tmp, png);
+  try {
+    // 첨부 버튼은 글자가 아니라 aria-label로 이름이 붙어 있어요. (HTML/마크다운 모드용 숨은 복제본이 있어 보이는 것만 선택)
+    await page.locator('.mce-btn.mce-menubtn[aria-label="첨부"]:visible').first().click();
+    await page.waitForTimeout(700);
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser', { timeout: 10000 }),
+      page.locator('.mce-menu-item', { hasText: '사진' }).first().click(),
+    ]);
+    const uploaded = page.waitForResponse((r) => r.url().includes('/manage/post/attach.json'), { timeout: 30000 });
+    await chooser.setFiles(tmp);
+    const res = await uploaded;
+    if (res.status() !== 200) throw new Error('이미지 업로드 응답 ' + res.status());
+    await page.waitForFunction(() => window.tinymce.get('editor-tistory').getContent().includes('[##_Image|'), null, { timeout: 15000 });
+    return await page.evaluate(() => window.tinymce.get('editor-tistory').getContent());
+  } finally {
+    fs.unlink(tmp, () => {});
+  }
+}
+
 async function fillEditor(page, post) {
   // 로드 직후 "이어서 작성하시겠습니까?" 확인창이 뜰 수 있어요. 취소하면 편집기가 초기화되므로 지나간 뒤에 입력합니다.
   await page.waitForTimeout(3500);
@@ -329,6 +357,10 @@ async function fillEditor(page, post) {
     await tagInput.fill(t);
     await tagInput.press('Enter');
   }
+
+  // 대표 이미지 카드는 본문보다 먼저 업로드해서(편집기가 비어 있을 때) 맨 앞에 둡니다.
+  let lead = '';
+  if (post.card) lead = await attachCard(page, post.card);
 
   // 본문은 마지막에, TinyMCE 편집기에 직접 넣습니다. (HTML 모드의 CodeMirror 값은 저장 요청에 반영되지 않았어요)
   const textLen = await page.evaluate((html) => {
@@ -341,7 +373,7 @@ async function fillEditor(page, post) {
     ed.fire('change');
     ed.nodeChanged();
     return ed.getContent({ format: 'text' }).trim().length;
-  }, post.content || '');
+  }, lead + (post.content || ''));
   if (textLen < 0) throw new Error('티스토리 편집기(TinyMCE)를 찾지 못했어요. 티스토리 화면이 바뀌었을 수 있어요.');
   if (textLen === 0) throw new Error('본문이 편집기에 들어가지 않았어요.');
 
@@ -364,7 +396,7 @@ async function saveDraft(page) {
       try { body = JSON.parse(q.postData() || '{}'); } catch (e) { /* 무시 */ }
       page.off('response', onResponse);
       clearTimeout(timer);
-      resolve({ status: r.status(), textLen: String(body.content || '').replace(/<[^>]*>/g, '').trim().length, tables: (String(body.content || '').match(/<table[\s>]/gi) || []).length, tags: body.tags || '', overwrote: /\/\d+$/.test(r.url()) });
+      resolve({ status: r.status(), textLen: String(body.content || '').replace(/<[^>]*>/g, '').trim().length, tables: (String(body.content || '').match(/<table[\s>]/gi) || []).length, tags: body.tags || '', images: String(body.content || '').split('[##_Image|').length - 1, overwrote: /\/\d+$/.test(r.url()) });
     };
     page.on('response', onResponse);
   });
@@ -376,7 +408,7 @@ async function saveDraft(page) {
   const serverOk = !!req && req.status === 200 && req.textLen > 0;
   const grew = after > before;
   const via = !req ? '저장 요청을 확인하지 못함' : !serverOk ? '서버 응답 ' + req.status + ', 본문 ' + req.textLen + '자' : !grew ? '서버는 받았지만 임시저장 개수가 늘지 않음(기존 글 덮어쓰기 의심)' : '서버 200 · 본문 ' + req.textLen + '자 · 개수 증가';
-  return { ok: serverOk && grew, before, after, via, tables: req ? req.tables : 0, tags: req ? req.tags : '', textLen: req ? req.textLen : 0 };
+  return { ok: serverOk && grew, before, after, via, tables: req ? req.tables : 0, images: req ? req.images : 0, tags: req ? req.tags : '', textLen: req ? req.textLen : 0 };
 }
 
 async function publishPublic(page) {
@@ -471,6 +503,7 @@ async function upload(post, mode, { interactive }) {
       content: '<h2>자동화 테스트</h2><p>이 글은 자동화 점검용 임시저장 글이에요. 공개되지 않으니 확인 후 삭제해도 됩니다.</p><ul><li>제목</li><li>본문(HTML)</li><li>태그</li></ul>',
       tags: '자동화테스트, 임시저장',
     };
+    if (!flag('no-card')) post.card = { title: post.title, tags: post.tags, blogName: 'RIRUME TRAVEL' };
     const r = await upload(post, 'draft', { interactive: true });
     log(r.ok ? '임시저장 성공 — 임시저장 개수 ' + r.before + ' → ' + r.after + ' (' + r.via + ')' : '임시저장 확인 실패 — 임시저장 개수 ' + r.before + ' → ' + r.after + ' (' + r.via + ')');
     process.exitCode = r.ok ? 0 : 1;
